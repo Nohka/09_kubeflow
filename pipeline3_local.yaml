@@ -1,0 +1,322 @@
+# PIPELINE DEFINITION
+# Name: ml-pipeline-local
+# Inputs:
+#    epochs: int [Default: 100.0]
+components:
+  comp-evaluate-model:
+    executorLabel: exec-evaluate-model
+    inputDefinitions:
+      artifacts:
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+        test_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        ytest_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.ClassificationMetrics
+            schemaVersion: 0.0.1
+        scalar_metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+  comp-load-data:
+    executorLabel: exec-load-data
+    outputDefinitions:
+      artifacts:
+        output_csv:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-preprocess-data:
+    executorLabel: exec-preprocess-data
+    inputDefinitions:
+      artifacts:
+        input_csv:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+    outputDefinitions:
+      artifacts:
+        output_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        output_train:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        output_ytest:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        output_ytrain:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+  comp-train-model:
+    executorLabel: exec-train-model
+    inputDefinitions:
+      artifacts:
+        train_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        ytrain_data:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        epochs:
+          defaultValue: 10.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+    outputDefinitions:
+      artifacts:
+        model_output:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+deploymentSpec:
+  executors:
+    exec-evaluate-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'scikit-learn'\
+          \ 'joblib'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate_model(\n    test_data: Input[Dataset],\n    ytest_data:\
+          \ Input[Dataset],\n    model: Input[Model],\n    metrics: Output[ClassificationMetrics],\n\
+          \    scalar_metrics: Output[Metrics],\n):\n    import pandas as pd\n   \
+          \ from sklearn.metrics import confusion_matrix, accuracy_score\n    from\
+          \ joblib import load\n\n    X_test = pd.read_csv(test_data.path)\n    y_test\
+          \ = pd.read_csv(ytest_data.path)\n\n    clf = load(model.path)\n    y_pred\
+          \ = clf.predict(X_test)\n\n    # 1. Log Scalar Metrics (Accuracy)\n    acc\
+          \ = accuracy_score(y_test, y_pred)\n    scalar_metrics.log_metric(\"accuracy\"\
+          , float(acc))\n\n    # 2. Log Confusion Matrix (Visualizes in Kubeflow UI)\n\
+          \    cm = confusion_matrix(y_test, y_pred)\n    metrics.log_confusion_matrix(\n\
+          \        categories=[\"setosa\", \"versicolor\", \"virginica\"], matrix=cm.tolist()\n\
+          \    )\n\n"
+        image: python:3.9
+    exec-load-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - load_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'scikit-learn'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef load_data(output_csv: Output[Dataset]):\n    from sklearn.datasets\
+          \ import load_iris\n    import pandas as pd\n\n    iris = load_iris()\n\
+          \    df = pd.DataFrame(data=iris.data, columns=iris.feature_names)\n   \
+          \ df[\"target\"] = iris.target\n    df.to_csv(output_csv.path, index=False)\n\
+          \n"
+        image: python:3.9
+    exec-preprocess-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - preprocess_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'scikit-learn'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef preprocess_data(\n    input_csv: Input[Dataset],\n    output_train:\
+          \ Output[Dataset],\n    output_test: Output[Dataset],\n    output_ytrain:\
+          \ Output[Dataset],\n    output_ytest: Output[Dataset],\n):\n    import pandas\
+          \ as pd\n    from sklearn.preprocessing import StandardScaler\n    from\
+          \ sklearn.model_selection import train_test_split\n\n    df = pd.read_csv(input_csv.path)\n\
+          \    features = df.drop(columns=[\"target\"])\n    target = df[\"target\"\
+          ]\n\n    scaler = StandardScaler()\n    scaled_features = scaler.fit_transform(features)\n\
+          \n    X_train, X_test, y_train, y_test = train_test_split(\n        scaled_features,\
+          \ target, test_size=0.2, random_state=42\n    )\n\n    pd.DataFrame(X_train,\
+          \ columns=features.columns).to_csv(\n        output_train.path, index=False\n\
+          \    )\n    pd.DataFrame(X_test, columns=features.columns).to_csv(output_test.path,\
+          \ index=False)\n    pd.DataFrame(y_train).to_csv(output_ytrain.path, index=False)\n\
+          \    pd.DataFrame(y_test).to_csv(output_ytest.path, index=False)\n\n"
+        image: python:3.9
+    exec-train-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'scikit-learn'\
+          \ 'joblib'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_model(\n    train_data: Input[Dataset],\n    ytrain_data:\
+          \ Input[Dataset],\n    model_output: Output[Model],\n    epochs: int = 10,\
+          \  # Added parameter\n):\n    import pandas as pd\n    from sklearn.linear_model\
+          \ import LogisticRegression\n    from joblib import dump\n\n    X_train\
+          \ = pd.read_csv(train_data.path)\n    y_train = pd.read_csv(ytrain_data.path).values.ravel()\n\
+          \n    # Note: LogisticRegression uses 'max_iter' instead of 'epochs'\n \
+          \   model = LogisticRegression(max_iter=epochs)\n    model.fit(X_train,\
+          \ y_train)\n\n    dump(model, model_output.path)\n    print(f\"Model trained\
+          \ for {epochs} iterations and saved.\")\n\n"
+        image: python:3.9
+pipelineInfo:
+  name: ml-pipeline-local
+root:
+  dag:
+    tasks:
+      evaluate-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-evaluate-model
+        dependentTasks:
+        - preprocess-data
+        - train-model
+        inputs:
+          artifacts:
+            model:
+              taskOutputArtifact:
+                outputArtifactKey: model_output
+                producerTask: train-model
+            test_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_test
+                producerTask: preprocess-data
+            ytest_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_ytest
+                producerTask: preprocess-data
+        taskInfo:
+          name: evaluate-model
+      load-data:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-load-data
+        taskInfo:
+          name: load-data
+      preprocess-data:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-preprocess-data
+        dependentTasks:
+        - load-data
+        inputs:
+          artifacts:
+            input_csv:
+              taskOutputArtifact:
+                outputArtifactKey: output_csv
+                producerTask: load-data
+        taskInfo:
+          name: preprocess-data
+      train-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-model
+        dependentTasks:
+        - preprocess-data
+        inputs:
+          artifacts:
+            train_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_train
+                producerTask: preprocess-data
+            ytrain_data:
+              taskOutputArtifact:
+                outputArtifactKey: output_ytrain
+                producerTask: preprocess-data
+          parameters:
+            epochs:
+              componentInputParameter: epochs
+        taskInfo:
+          name: train-model
+  inputDefinitions:
+    parameters:
+      epochs:
+        defaultValue: 100.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.0
