@@ -1,9 +1,6 @@
-from typing import Dict, List
-from kfp import dsl
-from kfp import compiler
+from kfp import dsl, compiler
 import kfp
 from kfp.dsl import Input, Output, Dataset, Model, ClassificationMetrics, Metrics, HTML
-import os
 
 
 # Step 1: Load Dataset
@@ -39,18 +36,18 @@ def preprocess_data(
     scaled_features = scaler.fit_transform(features)
 
     X_train, X_test, y_train, y_test = train_test_split(
-        scaled_features, target, test_size=0.2, random_state=42
+        scaled_features, target, test_size=0.2, random_state=42, stratify=target
     )
 
     pd.DataFrame(X_train, columns=features.columns).to_csv(
         output_train.path, index=False
     )
     pd.DataFrame(X_test, columns=features.columns).to_csv(output_test.path, index=False)
-    pd.DataFrame(y_train).to_csv(output_ytrain.path, index=False)
-    pd.DataFrame(y_test).to_csv(output_ytest.path, index=False)
+    pd.DataFrame({"target": y_train}).to_csv(output_ytrain.path, index=False)
+    pd.DataFrame({"target": y_test}).to_csv(output_ytest.path, index=False)
 
 
-# Step 3: Train Model (Added Epochs Parameter)
+# Step 3: Train Model
 @dsl.component(
     base_image="python:3.9", packages_to_install=["pandas", "scikit-learn", "joblib"]
 )
@@ -58,24 +55,29 @@ def train_model(
     train_data: Input[Dataset],
     ytrain_data: Input[Dataset],
     model_output: Output[Model],
-    epochs: int = 10,  # Added parameter
+    epochs: int = 10,
 ):
     import pandas as pd
     from sklearn.linear_model import LogisticRegression
     from joblib import dump
 
     X_train = pd.read_csv(train_data.path)
-    y_train = pd.read_csv(ytrain_data.path).values.ravel()
+    y_train = pd.read_csv(ytrain_data.path)["target"].to_numpy()
 
-    # Note: LogisticRegression uses 'max_iter' instead of 'epochs'
-    model = LogisticRegression(max_iter=epochs)
+    model = LogisticRegression(max_iter=epochs, random_state=42)
     model.fit(X_train, y_train)
 
     dump(model, model_output.path)
+
+    # Helpful metadata for artifact inspection
+    model_output.metadata["framework"] = "scikit-learn"
+    model_output.metadata["model_type"] = "LogisticRegression"
+    model_output.metadata["max_iter"] = epochs
+
     print(f"Model trained for {epochs} iterations and saved.")
 
 
-# Step 4: Evaluate Model (Added Visualizations)
+# Step 4: Evaluate Model + Visualizations
 @dsl.component(
     base_image="python:3.9", packages_to_install=["pandas", "scikit-learn", "joblib"]
 )
@@ -85,29 +87,101 @@ def evaluate_model(
     model: Input[Model],
     metrics: Output[ClassificationMetrics],
     scalar_metrics: Output[Metrics],
+    html_report: Output[HTML],
 ):
     import pandas as pd
-    from sklearn.metrics import confusion_matrix, accuracy_score
+    from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
     from joblib import load
+    import html
 
     X_test = pd.read_csv(test_data.path)
-    y_test = pd.read_csv(ytest_data.path)
+    y_test = pd.read_csv(ytest_data.path)["target"].to_numpy()
 
     clf = load(model.path)
     y_pred = clf.predict(X_test)
 
-    # 1. Log Scalar Metrics (Accuracy)
+    class_names = ["setosa", "versicolor", "virginica"]
+
+    # Scalar metrics
     acc = accuracy_score(y_test, y_pred)
     scalar_metrics.log_metric("accuracy", float(acc))
+    scalar_metrics.log_metric("num_test_samples", float(len(y_test)))
 
-    # 2. Log Confusion Matrix (Visualizes in Kubeflow UI)
-    cm = confusion_matrix(y_test, y_pred)
-    metrics.log_confusion_matrix(
-        categories=["setosa", "versicolor", "virginica"], matrix=cm.tolist()
+    # Kubeflow confusion matrix visualization
+    cm = confusion_matrix(y_test, y_pred, labels=[0, 1, 2])
+    metrics.log_confusion_matrix(categories=class_names, matrix=cm.tolist())
+
+    # Add a few metadata fields for easier debugging
+    metrics.metadata["accuracy"] = float(acc)
+    metrics.metadata["classes"] = class_names
+
+    # Build a reliable HTML artifact so the UI has a concrete file to render
+    report_dict = classification_report(
+        y_test, y_pred, target_names=class_names, output_dict=True
     )
+    report_df = pd.DataFrame(report_dict).transpose().round(4)
+
+    cm_df = pd.DataFrame(cm, index=class_names, columns=class_names)
+
+    html_content = f"""
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Iris Evaluation Report</title>
+        <style>
+          body {{
+            font-family: Arial, sans-serif;
+            margin: 24px;
+          }}
+          h1, h2 {{
+            color: #222;
+          }}
+          table {{
+            border-collapse: collapse;
+            margin: 12px 0 24px 0;
+            width: auto;
+          }}
+          th, td {{
+            border: 1px solid #ccc;
+            padding: 8px 12px;
+            text-align: center;
+          }}
+          th {{
+            background: #f5f5f5;
+          }}
+          .metric {{
+            font-size: 18px;
+            margin-bottom: 16px;
+          }}
+          .note {{
+            color: #666;
+            font-size: 13px;
+          }}
+        </style>
+      </head>
+      <body>
+        <h1>Iris Model Evaluation</h1>
+        <div class="metric"><strong>Accuracy:</strong> {acc:.4f}</div>
+
+        <h2>Confusion Matrix</h2>
+        {cm_df.to_html(border=0)}
+
+        <h2>Classification Report</h2>
+        {report_df.to_html(border=0)}
+
+        <p class="note">
+          Rows in the confusion matrix are true labels; columns are predicted labels.
+        </p>
+      </body>
+    </html>
+    """
+
+    with open(html_report.path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    print(f"Accuracy: {acc:.4f}")
 
 
-# Define the pipeline with configurable arguments
 @dsl.pipeline(name="ml-pipeline-local")
 def ml_pipeline(epochs: int = 100):
     load_op = load_data()
@@ -126,6 +200,12 @@ def ml_pipeline(epochs: int = 100):
         model=train_op.outputs["model_output"],
     )
 
+    # Optional: make caching explicit
+    load_op.set_caching_options(True)
+    preprocess_op.set_caching_options(True)
+    train_op.set_caching_options(True)
+    evaluate_op.set_caching_options(True)
+
 
 if __name__ == "__main__":
     compiler.Compiler().compile(
@@ -134,12 +214,11 @@ if __name__ == "__main__":
 
     client = kfp.Client(host="http://localhost:8080")
 
-    # Define the experiment name here
     MY_EXPERIMENT_NAME = "Classification"
 
     client.create_run_from_pipeline_func(
         ml_pipeline,
         arguments={"epochs": 150},
-        experiment_name=MY_EXPERIMENT_NAME,  # This sets the experiment name
-        run_name="Run_150_epochs",  # Optional: sets the specific run name
+        experiment_name=MY_EXPERIMENT_NAME,
+        run_name="Run_150_epochs",
     )
